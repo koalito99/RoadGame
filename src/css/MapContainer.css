@@ -1,0 +1,13 @@
+.gm-style-mtc{
+    display: none;
+}
+.mainContainer{
+    display: flex;
+}
+.map-item{
+    width: 100%;
+    /* margin: 0 !important; */
+}
+/* .mapController-item{
+    margin-left: 15%;
+} */
