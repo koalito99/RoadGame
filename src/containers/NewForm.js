@@ -2,7 +2,9 @@ import React, { Component } from 'react';
 
 import gcp_config from '../GCP_configs';
 import SurveyQuestions from '../components/SurveyQuestions';
-
+import ErrorModal from '../components/ErrorModal';
+import fetchStream from 'fetch-readablestream';
+import { Redirect } from "react-router-dom";
 class NewForm extends Component {
 
   constructor(props) {
@@ -11,16 +13,32 @@ class NewForm extends Component {
     this.state = {
       setNewFields: this.setNewFields.bind(this),
       answers: this.setNewFields(this.props.post),
+      handleValidate: this.handleValidate.bind(this),
+      showModal: false,
+      errorMsg: '',
+      childWasSaved: false,
+      parentId: ''
     }; // <- set up react state
   }
 
   static defaultProps = {
     constants: {
       numericFields: ['difficulty', 'score'],
-      textFields: ['place', 'lon', 'lat', 'story'],
-      arrayFields: ['labels', 'question_images', 'story_images'],
+      textFields: ['place', 'story'],
+      arrayFields: ['labels', 'question_images', 'coords', 'story_images', 'parents'],
       checkFields: ['tourists_relevancy', 'night_item', 'see_item']
     },
+  }
+
+  handleValidate() {
+    if (this.props.validator.allValid()) {
+      return true;
+    } else {
+      this.props.validator.showMessages();
+      this.forceUpdate();
+
+      return false;
+    }
   }
 
   setNewFields() {
@@ -57,7 +75,6 @@ class NewForm extends Component {
     }
     return change;
   }
-
 
   isEmpty = (data) => {
     const { numericFields, textFields, arrayFields, checkFields } = this.props.constants;
@@ -97,6 +114,7 @@ class NewForm extends Component {
 
 
   addToAnswer = (answers) => {
+    console.log('new form', answers);
     this.setState({ answers: answers });
   }
 
@@ -104,6 +122,9 @@ class NewForm extends Component {
   // ---> 1. GCP <---
   //Submit
   addAnswers = (e) => {
+    if (!this.handleValidate())
+      return;
+
     const { answers, } = this.state;
     e.preventDefault(); // <- prevent form submit from reloading the page
 
@@ -136,6 +157,7 @@ class NewForm extends Component {
           newAn.answers = pushIfExist(newAn.answers, tr['wrong_answer1'], true);
           newAn.answers = pushIfExist(newAn.answers, tr['wrong_answer2'], true);
           newAn.answers = pushIfExist(newAn.answers, tr['wrong_answer3'], true);
+          //newAn.assigned_user = "weberr@outlook.com";
 
           if (sent)
             delete newAn.datastore_id;
@@ -166,8 +188,24 @@ class NewForm extends Component {
     } return pushThere;
   }
 
-  updatePostInDB = (data) => {
+  readAllChunks = (readableStream) => {
+    const reader = readableStream.getReader();
+    const chunks = [];
 
+    function pump() {
+      return reader.read().then(({ value, done }) => {
+        if (done) {
+          return chunks;
+        }
+        chunks.push(value);
+        return pump();
+      });
+    }
+
+    return pump();
+  }
+
+  updatePostInDB = (data) => {
     if (this.isEmpty(data)) {
       const id = 'negative';
       this.showEl(id, () => document.getElementById(id).style.display = 'none');
@@ -178,7 +216,12 @@ class NewForm extends Component {
       headers.set('Authorization', 'Basic ' + btoa(gcp_config.username + ":" + gcp_config.password));
       headers.set('Accept', 'application/json');
       headers.set('Content-Type', 'application/json');
-
+      if (this.props.parentId) {
+        data.parents = [parseInt(this.props.parentId)];
+      }
+      if (this.state.parentId.length > 0) {
+        data.parents = [parseInt(this.state.parentId)];
+      }
       const toDB = JSON.stringify({ item: data });
       console.log("SAVE NEW ITEM: ", toDB);
 
@@ -186,10 +229,57 @@ class NewForm extends Component {
         method: 'POST',
         headers: headers,
         body: toDB
-      }).then(res => console.log('Status: ', res.status))
+      })
+        .then(res => res.json())
+        .then(res => {
+
+          console.log('edit data', JSON.parse(toDB).item);
+          if (res.status === 500) {
+            this.setState({ showModal: true });
+            return this.readAllChunks(res.body);
+          }
+          // this.props.getDataItems();
+          console.log('edit item is', this.state.answers);
+          this.showEl('success', () => { this.props.setNew(false) });
+          if (this.props.parentId) {
+            this.setState({
+              childWasSaved: true
+            })
+          }
+
+          this.props.insertDataItems({ ...JSON.parse(toDB).item, datastore_id: res, original_id: res })
+        }
+        )
         .catch(error => console.error('Error: ', error));
 
-      this.showEl('success', () => { this.props.setNew(false) });
+      //   fetchStream('https://roadio-master.appspot.com/v1/edit_item', {
+      //     method: 'POST',
+      //     headers: headers,
+      //     body: toDB
+      //   })
+      //     .then(res => {
+
+
+      //       console.log('res', res);
+
+      //       if (res.status === 500) {
+      //         this.setState({ showModal: true });
+      //         return this.readAllChunks(res.body);
+      //       }
+      //       // this.props.getDataItems();
+      //       console.log('edit item is', this.state.answers);
+      //       this.showEl('success', () => { this.props.setNew(false) });
+      //       if (this.props.parentId) {
+      //         this.setState({
+      //           childWasSaved: true
+      //         })
+      //       }
+      //     })
+      //     .then(chunks => {
+      //       chunks && this.setState({ errorMsg: String.fromCharCode.apply(null, chunks[0]) });
+      //       console.log('chunks', chunks);
+      //     })
+      //     .catch(error => console.error('Error: ', error));
     }
   }
 
@@ -201,8 +291,8 @@ class NewForm extends Component {
     return answers;
   }
 
-  processPlace= (answers) => {
-    if(answers.place === ''){
+  processPlace = (answers) => {
+    if (answers.place === '') {
       answers.place = null;
       delete answers.lon;
       delete answers.lat;
@@ -211,14 +301,14 @@ class NewForm extends Component {
   }
 
 
-  showEl = (id, func='') => {
+  showEl = (id, func = '') => {
     const current = document.getElementById(id);
     const move = this.moveToTop;
     if (current.style.display === 'none') {
       current.style.display = 'block';
       current.scrollIntoView(true);
       setTimeout(() => {
-        func(); 
+        func();
         move();  // move to top
       }, 1000);
     }
@@ -226,19 +316,37 @@ class NewForm extends Component {
 
   moveToTop = () => document.getElementById("top").scrollIntoView(true);
 
-  render() {
+  handleCloseErrorMsg = () => {
+    this.setState({ showModal: false });
+  };
 
+  render() {
+    if (this.state.childWasSaved) {
+      return <Redirect to={"/"} />
+    }
     return (
       <div>
-          <SurveyQuestions
-            answers={this.state.answers}
-            placesList={this.props.placesList}
-            changed={this.state.changedForMap}
-            changeToFalse={this.changeToFalse}
-            addToAnswer={this.addToAnswer}
-            post={this.props.post}
-          />
-
+        <SurveyQuestions
+          answers={this.state.answers}
+          placesList={this.props.placesList}
+          changed={this.state.changedForMap}
+          changeToFalse={this.changeToFalse}
+          addToAnswer={this.addToAnswer}
+          post={this.props.post}
+          data={this.props.data}
+          validator={this.props.validator}
+          isNewForm={true}
+          changeParentId={(number, e) => {
+            console.log(e.target.value);
+            this.setState({ parentId: e.target.value });
+          }}
+          parentId={this.state.parentId}
+        />
+        <ErrorModal
+          text={this.state.errorMsg}
+          showModal={this.state.showModal}
+          handleCloseModal={this.handleCloseErrorMsg}
+        />
 
         <div style={{
           display: 'flex',
@@ -253,7 +361,7 @@ class NewForm extends Component {
             <i className="arrow left icon"></i>
             Cancel
             </button>
-          <button className='ui right labeled icon violet basic button'
+          <button type={"button"} className='ui right labeled icon violet basic button'
             style={{ margin: '30px' }}
             onClick={(e) => { this.addAnswers(e) }}>
             Save
@@ -264,6 +372,5 @@ class NewForm extends Component {
     )
   }
 }
-
 
 export default NewForm;

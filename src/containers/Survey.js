@@ -2,15 +2,21 @@ import React, { Component } from 'react';
 
 import gcp_config from '../GCP_configs';
 import SurveyQuestions from '../components/SurveyQuestions';
+import fetchStream from 'fetch-readablestream';
+import ErrorModal from '../components/ErrorModal';
 
 import '../css/Button.css';
+
+import {
+  withRouter
+} from 'react-router-dom'
 
 class Survey extends Component {
 
   constructor(props) {
     super(props);
 
-    console.log("SURVEY ANS: ", this.props.post);
+    // console.log("SURVEY ANS: ", this.props.post);
 
     this.state = {
       setNewFields: this.setNewFields.bind(this),
@@ -18,16 +24,40 @@ class Survey extends Component {
       listWithPreviosAnswers: [],
       changed: false,
       changedForMap: false,
+      showModal: false,
+      errorMsg: '',
+      questionChanged: false,
     }; // <- set up react state
   }
 
   static defaultProps = {
     constants: {
       numericFields: ['difficulty', 'score'],
-      textFields: ['place', 'lon', 'lat', 'story'],
-      arrayFields: ['labels', 'question_images', 'story_images'],
+      textFields: ['place', 'story'],
+      arrayFields: ['labels', 'question_images', 'story_images', 'coords'],
       checkFields: ['tourists_relevancy', 'night_item', 'see_item']
     },
+  }
+
+  handleCloseErrorMsg = () => {
+    this.setState({ showModal: false });
+  };
+
+  readAllChunks = (readableStream) => {
+    const reader = readableStream.getReader();
+    const chunks = [];
+
+    function pump() {
+      return reader.read().then(({ value, done }) => {
+        if (done) {
+          return chunks;
+        }
+        chunks.push(value);
+        return pump();
+      });
+    }
+
+    return pump();
   }
 
   setNewFields(change) {
@@ -57,7 +87,7 @@ class Survey extends Component {
 
     let right = getIfNotNull(change, 'right_answer');
     let index = change.answers.indexOf(right);
-    if (index !== -1){
+    if (index !== -1) {
       change.answers.splice(index, 1);
     }
 
@@ -106,7 +136,8 @@ class Survey extends Component {
 
 
   addToAnswer = (answers) => {
-    this.setState({ answers: answers });
+    console.log('edit answers', answers);
+    this.setState({ answers: answers, questionChanged: true });
   }
 
 
@@ -117,22 +148,18 @@ class Survey extends Component {
     const { showEl } = this.props;
 
     e.preventDefault(); // <- prevent form submit from reloading the page
-    this.addToPreviousAnswers(answers);
-
-    document.getElementById("form").reset(); // <- clear the input
-    this.showNextItems(e, postNum);
 
     let copy = Object.assign({}, answers);
     copy.submission_time = new Date().toLocaleString("en-US");
 
-    this.processTrivias(copy);  // <- process trivias and send to db
+    this.processTrivias(e, postNum, copy);  // <- process trivias and send to db
 
     showEl('success', 1000, true);
     this.setState({ preview: null, hanged: true, changedForMap: true });
 
   }
 
-  processTrivias = (answers) => {
+  processTrivias = (e, postNum, answers) => {
     let trivias = [answers.trivia1, answers.trivia2];
     delete answers.trivia1;
     delete answers.trivia2;
@@ -167,10 +194,10 @@ class Survey extends Component {
     }
 
     if (toDB.length === 0) {
-      this.updatePostInDB(answers);
+      this.updatePostInDB(e, postNum, answers);
     } else {
       for (let i in toDB) {
-        this.updatePostInDB(toDB[i]);
+        this.updatePostInDB(e, postNum, toDB[i]);
       }
     }
   }
@@ -185,20 +212,39 @@ class Survey extends Component {
     } return pushThere;
   }
 
-  updatePostInDB = (data) => {
+  updatePostInDB = (e, postNum, data) => {
+    const { answers, } = this.state;
     let headers = new Headers();
     headers.set('Authorization', 'Basic ' + btoa(gcp_config.username + ":" + gcp_config.password));
     headers.set('Accept', 'application/json');
     headers.set('Content-Type', 'application/json');
-
+    delete data.lat;
+    delete data.lon;
     const toDB = JSON.stringify({ item: data });
     console.log("UPDATE: ", toDB);
 
-    fetch('https://roadio-master.appspot.com/v1/edit_item', {
+    fetchStream('https://roadio-master.appspot.com/v1/edit_item', {
       method: 'POST',
       headers: headers,
       body: toDB
-    }).then(res => console.log('Status: ', res.status))
+    })
+      .then(res => {
+        console.log('Update Status: ', res.status);
+        if (res.status === 500) {
+          this.setState({ showModal: true });
+          return this.readAllChunks(res.body);
+        }
+
+        this.props.updateDataItems(JSON.parse(toDB));
+
+        this.addToPreviousAnswers(answers);
+
+        document.getElementById("form").reset(); // <- clear the input
+        this.showNextItems(e, postNum);
+      })
+      .then(chunks => {
+        chunks && this.setState({ errorMsg: String.fromCharCode.apply(null, chunks[0]) });
+      })
       .catch(error => console.error('Error: ', error));
   }
 
@@ -234,15 +280,30 @@ class Survey extends Component {
 
   //react lifecycle methods
   static getDerivedStateFromProps(props, state) {
-    console.log("DELIVER ANSWERS: ", state.answers);
+    // console.log("DELIVER ANSWERS: ", state.answers);
 
-    if(state.answers.datastore_id !== props.post.datastore_id){
-      return { answers: props.submitted ? '' : state.setNewFields(props.post), changedForMap: true};
+    if (state.answers && state.answers.datastore_id !== props.post.datastore_id) {
+      return { answers: props.submitted ? '' : state.setNewFields(props.post), changedForMap: true };
     }
     if (state.changed) {
       return { answers: props.submitted ? '' : state.setNewFields(props.post), changed: false };
     } return null;
   }
+
+  removeQuestion = () => {
+    const { post: { datastore_id } } = this.props;
+    let headers = new Headers();
+    headers.set('Authorization', 'Basic ' + btoa(gcp_config.username + ":" + gcp_config.password));
+    headers.set('Accept', 'application/json');
+    headers.set('Content-Type', 'application/json');
+    fetchStream(`https://roadio-master.appspot.com/v1/delete_item_control?datastore_id=${datastore_id}`, {
+      method: 'GET',
+      headers: headers,
+    }).then(res => {
+      const { history } = this.props;
+      history.push("/");
+    }).catch(err => { });
+  };
 
   render() {
 
@@ -251,10 +312,10 @@ class Survey extends Component {
 
     return submitted ? (
       <button className={numberOfPreviousElemnts > 0 ?
-        'ui labeled icon violet basic massive button ' : 'ui labeled icon grey basic massive button disabled'}
+        'ui labeled icon violet basic massive button disabled' : 'ui labeled icon grey basic massive button disabled'}
         style={{ margin: '30px 35%' }}
         onClick={this.showPrev}>
-        <i class="arrow left icon"></i>
+        <i className="arrow left icon"></i>
         הקודם
       </button>
     ) : (
@@ -267,6 +328,17 @@ class Survey extends Component {
             changeToFalse={this.changeToFalse}
             addToAnswer={this.addToAnswer}
             post={this.props.post}
+            validator={this.props.validator}
+            data={this.props.data}
+            isNewForm={false}
+            removeQuestion={this.removeQuestion}
+            questionChanged={this.state.questionChanged}
+          />
+
+          <ErrorModal
+            text={this.state.errorMsg}
+            showModal={this.state.showModal}
+            handleCloseModal={this.handleCloseErrorMsg}
           />
 
           <div style={{
@@ -274,7 +346,7 @@ class Survey extends Component {
             justifyContent: 'space-between',
           }}>
             <button className={numberOfPreviousElemnts > 0 ?
-              'ui labeled icon violet basic button ' : 'ui labeled icon grey basic button disabled'}
+              'ui labeled icon violet basic button' : 'ui labeled icon grey basic button'}
               style={{ margin: '30px' }}
               onClick={this.showPrev}>
               <i className="arrow left icon"></i>
@@ -292,4 +364,4 @@ class Survey extends Component {
   }
 }
 
-export default Survey;
+export default withRouter(Survey);
